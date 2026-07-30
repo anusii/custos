@@ -1,0 +1,4 @@
+mcp>=1.28,<2
+httpx>=0.27
+rdflib>=7.0
+jwcrypto>=1.5,<2

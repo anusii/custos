@@ -1,0 +1,12 @@
+@prefix schema: <https://schema.org/> .
+@prefix custos: <https://custos.example/ns#> .
+
+<#travel-prefs>
+    a custos:ContextFact ;
+    custos:dietaryRestriction "Vegetarian; no shellfish." ;
+    custos:budgetBand "Mid-range: around AUD 200 per night for accommodation." ;
+    custos:accommodationPreference "Prefers boutique guesthouses over large chain hotels." ;
+    custos:pastDestination "Kyoto (2024), Queenstown (2023), Hobart (2023)." ;
+    custos:interests "Old towns, landscapes, nature, historic sites" ;
+    custos:transpotationPreferences "Car." ;
+    custos:travelStyle "Slow travel; two or three nights per place, walkable towns." .

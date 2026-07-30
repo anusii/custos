@@ -1,0 +1,8 @@
+{
+  "_comment": "Stub consent store for the Phase 0 prototype. The Flutter console will eventually toggle these; for now edit by hand. To DEMO REVOCATION, flip travel.read from true to false and re-run the agent's query -- the next call is refused. Phase 1 replaces this file with real ACL/ACP grants + Solid-OIDC token validation.",
+  "grants": {
+    "travel": {
+      "read": true
+    }
+  }
+}

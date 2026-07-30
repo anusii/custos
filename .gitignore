@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Runtime artefacts
+audit.log
+dpop_key.json
+PLAN.md
+BasicSteps.md
+.venv/
+__pycache__/
+*.pyc
