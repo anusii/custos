@@ -45,6 +45,17 @@ from mcp.server.auth.provider import AccessToken, TokenVerifier
 
 import solid_auth_client
 
+# Advertised via server.py's AuthSettings.required_scopes (-> Protected
+# Resource Metadata's scopes_supported), and used as a fallback below when a
+# token's own `scope` claim is empty. CSS empirically doesn't always echo
+# granted scope into the issued token, even when it was requested and
+# granted at the authorization step -- and this design doesn't do
+# differentiated scope-based authorization anyway (grants.json does the
+# real per-purpose gating), so reporting these rather than an empty list
+# avoids the SDK's own scope-enforcement layer rejecting an otherwise-valid,
+# correctly-signed token.
+REQUIRED_SCOPES = ["openid", "webid"]
+
 _jwks_cache: JWKSet | None = None
 
 
@@ -80,19 +91,28 @@ class CustosTokenVerifier(TokenVerifier):
         try:
             verified = JWT(jwt=token, key=jwks)
             claims: dict[str, Any] = json.loads(verified.claims)
-        except Exception:
-            # Fail closed on any signature/expiry/format problem — a
+
+            # aud can be a single string or a list depending on how many
+            # audiences CSS attaches (e.g. once a real `resource` param is in
+            # play) — normalize to a single string since we don't enforce an
+            # audience match anyway (see module docstring).
+            aud = claims.get("aud")
+            if isinstance(aud, list):
+                aud = aud[0] if aud else None
+
+            scope = claims.get("scope", "")
+            return AccessToken(
+                token=token,
+                client_id=claims.get("client_id", "unknown"),
+                scopes=scope.split() if scope else REQUIRED_SCOPES,
+                expires_at=claims.get("exp"),
+                resource=aud,
+                subject=claims.get("webid") or claims.get("sub"),
+                claims=claims,
+            )
+        except Exception as exc:
+            # Fail closed on any signature/expiry/format/shape problem — a
             # prototype-appropriate catch-all, matching _load_grants()'s
             # posture in server.py of failing closed on malformed input.
+            print(f"[token_verify] rejected: {exc!r}")
             return None
-
-        scope = claims.get("scope", "")
-        return AccessToken(
-            token=token,
-            client_id=claims.get("client_id", "unknown"),
-            scopes=scope.split() if scope else [],
-            expires_at=claims.get("exp"),
-            resource=claims.get("aud"),
-            subject=claims.get("webid") or claims.get("sub"),
-            claims=claims,
-        )

@@ -220,8 +220,11 @@ __marimo__/
 # Runtime artefacts
 audit.log
 dpop_key.json
-PLAN.md
-BasicSteps.md
 .venv/
 __pycache__/
 *.pyc
+
+# Other
+PLAN.md
+BasicSteps.md
+LessonsLearned.md

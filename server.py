@@ -78,9 +78,10 @@ from rdflib.namespace import RDF
 from mcp.server.auth.middleware.auth_context import get_access_token as _get_caller_access_token
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 import solid_auth_client
-from broker_token_verifier import CustosTokenVerifier
+from broker_token_verifier import REQUIRED_SCOPES, CustosTokenVerifier
 
 # --------------------------------------------------------------------------- #
 # Configuration
@@ -120,12 +121,33 @@ if MCP_TRANSPORT == "streamable-http":
             "MCP_TRANSPORT=streamable-http requires POD_BASE_URL or MCP_OIDC_ISSUER "
             "to be set, so MCP-client tokens can be validated against an Authorization Server."
         )
+    # FastMCP auto-enables DNS-rebinding protection when host is loopback,
+    # allowlisting only 127.0.0.1/localhost Host headers. A tunnel (ngrok etc.)
+    # forwards requests with the public hostname in the Host header, which
+    # that default allowlist rejects with 421. Explicitly allow whatever
+    # MCP_RESOURCE_URL's host is, alongside the usual loopback entries.
+    _resource_host = urlsplit(_resource_url).netloc
+    _transport_security = TransportSecuritySettings(
+        allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", _resource_host, f"{_resource_host}:*"],
+    )
     mcp = FastMCP(
         "custos-broker",
         host=MCP_HTTP_HOST,
         port=MCP_HTTP_PORT,
         token_verifier=CustosTokenVerifier(),
-        auth=AuthSettings(issuer_url=_issuer_url, resource_server_url=_resource_url),
+        transport_security=_transport_security,
+        auth=AuthSettings(
+            issuer_url=_issuer_url,
+            resource_server_url=_resource_url,
+            # CSS needs at least these to issue a Solid-OIDC token (the webid
+            # claim is how we identify the caller). Advertised here so a
+            # spec-compliant MCP client reads them from our Protected
+            # Resource Metadata and includes them in its authorization
+            # request — our own oauth_test_client.py already does this
+            # explicitly; this is what makes an MCP client that reads PRM's
+            # scopes_supported do the same without being told separately.
+            required_scopes=REQUIRED_SCOPES,
+        ),
     )
 else:
     mcp = FastMCP("custos-broker")
