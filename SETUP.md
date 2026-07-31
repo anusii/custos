@@ -143,7 +143,14 @@ it), and `server.py`'s `_fetch_graph()` attaches `Authorization: DPoP <token>`
 | `LOCAL_CONTEXT_DIR` | Read from `<dir>/context/<purpose>/*.ttl` instead of a POD (what §2 uses by default). |
 | `SOLIDMCP_HOME` | Where `grants.json` / `audit.log` / `dpop_key.json` live. Defaults to this folder. |
 
-Update `claude_desktop_config.json`'s `env` block (from §2) with `POD_BASE_URL`
+**Running from the command line (e.g. testing streamable-HTTP, §2c):** copy
+`.env.example` to `.env` and fill in the values you need — `server.py` loads
+it automatically, so you don't have to retype `$env:` lines every restart.
+Values already set in your shell still take priority over the file. Never
+commit `.env` (it's gitignored).
+
+**Running via Claude Desktop (stdio, the default):** update
+`claude_desktop_config.json`'s `env` block (from §2) with `POD_BASE_URL`
 and, if you did §3b, `POD_OIDC_CLIENT_ID`/`SECRET`:
 
 ```json

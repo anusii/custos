@@ -60,14 +60,27 @@ Config (all optional, via environment variables):
 Exactly one of POD_BASE_URL / LOCAL_CONTEXT_DIR should be set. If neither is,
 we fall back to LOCAL_CONTEXT_DIR = <SOLIDMCP_HOME>/data so the server still
 runs against the seed data shipped alongside it.
+
+Any of the above can also be set in a `.env` file next to this script instead
+of the shell — see .env.example. Values already set in the real environment
+(e.g. Claude Desktop's `env` config block) take priority over the .env file.
 """
 
 from __future__ import annotations
 
-import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Must run before importing solid_auth_client/broker_token_verifier below —
+# both read their own env vars at module-import time, so .env has to be
+# loaded first. override=False (the default) means anything already set in
+# the real environment wins over the .env file.
+load_dotenv(Path(__file__).parent / ".env")
+
+import json
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
