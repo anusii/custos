@@ -93,6 +93,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+import pod_decryption
 import solid_auth_client
 from broker_token_verifier import REQUIRED_SCOPES, CustosTokenVerifier
 
@@ -195,6 +196,44 @@ def _is_granted(purpose: str, action: str = "read") -> bool:
     return bool(grants.get(purpose, {}).get(action, False))
 
 
+def _purpose_container_url(purpose: str) -> str | None:
+    """Full URL of a purpose's data container. A purpose must have an entry
+    in grants.json to be recognized at all (explicit opt-in — consent and
+    "this purpose exists" share one registry, no separate app allowlist).
+    Resolution order, first candidate that actually fetches wins:
+
+      1. grants.json's explicit "path" (relative to the POD root, or a full
+         URL) — for cases the two conventions below don't fit.
+      2. <POD root>/<purpose>/data/ — the convention real solidpod apps use
+         (each app owns a top-level folder with its own data/, encryption/,
+         sharing/ siblings, e.g. notepod/data/, papertrail/data/).
+      3. <POD_BASE_URL>context/<purpose>/ — the original convention, kept
+         for backward compatibility with purposes that pre-date it.
+    """
+    grants = _load_grants().get("grants", {})
+    if purpose not in grants:
+        return None
+    custom_path = grants[purpose].get("path")
+    root = solid_auth_client.pod_root_url()
+
+    candidates: list[str] = []
+    if custom_path:
+        if custom_path.startswith(("http://", "https://")):
+            candidates.append(custom_path.rstrip("/") + "/")
+        elif root:
+            candidates.append(root.rstrip("/") + "/" + custom_path.strip("/") + "/")
+    else:
+        if root:
+            candidates.append(root.rstrip("/") + "/" + purpose + "/data/")
+        if POD_BASE_URL:
+            candidates.append(POD_BASE_URL.rstrip("/") + "/" + CONTEXT_ROOT + "/" + purpose + "/")
+
+    for url in candidates:
+        if _fetch_graph(url) is not None:
+            return url
+    return None
+
+
 def _caller_id() -> str | None:
     """The authenticated MCP-client's subject (WebID), if this call arrived
     over streamable-HTTP with a valid Bearer token. None under stdio, or when
@@ -234,33 +273,28 @@ def _list_local_purposes() -> list[str]:
 
 
 def _list_pod_purposes() -> list[str]:
-    """List sub-containers of <POD_BASE_URL>context/ via LDP containment."""
-    url = POD_BASE_URL.rstrip("/") + "/" + CONTEXT_ROOT + "/"
-    g = _fetch_graph(url)
-    if g is None:
-        return []
+    """Every purpose registered in grants.json (explicit opt-in — this is
+    the "what exists" registry, regardless of whether read is currently
+    granted), plus sub-containers of <POD_BASE_URL>context/ via LDP
+    containment (the original auto-discovery, kept for anything not yet
+    added to grants.json)."""
     from rdflib import URIRef
 
-    ldp_contains = URIRef("http://www.w3.org/ns/ldp#contains")
-    purposes = []
-    for _, _, obj in g.triples((None, ldp_contains, None)):
-        name = str(obj).rstrip("/").rsplit("/", 1)[-1]
-        if name:
-            purposes.append(name)
-    return sorted(set(purposes))
-
-
-def _authenticated_headers(url: str, token: str) -> dict[str, str]:
-    return {
-        "Accept": "text/turtle",
-        "Authorization": f"DPoP {token}",
-        "DPoP": solid_auth_client.build_resource_dpop_proof(url, "GET", token),
-    }
+    purposes: set[str] = set(_load_grants().get("grants", {}).keys())
+    url = POD_BASE_URL.rstrip("/") + "/" + CONTEXT_ROOT + "/"
+    g = _fetch_graph(url)
+    if g is not None:
+        ldp_contains = URIRef("http://www.w3.org/ns/ldp#contains")
+        for _, _, obj in g.triples((None, ldp_contains, None)):
+            name = str(obj).rstrip("/").rsplit("/", 1)[-1]
+            if name:
+                purposes.add(name)
+    return sorted(purposes)
 
 
 def _fetch_graph(url: str) -> Graph | None:
     token = solid_auth_client.get_access_token()
-    headers = _authenticated_headers(url, token) if token else {"Accept": "text/turtle"}
+    headers = solid_auth_client.authenticated_headers(url, token) if token else {"Accept": "text/turtle"}
     try:
         resp = httpx.get(url, headers=headers, timeout=10.0)
         if resp.status_code == 401 and token:
@@ -268,7 +302,7 @@ def _fetch_graph(url: str) -> Graph | None:
             solid_auth_client.invalidate_token()
             token = solid_auth_client.get_access_token()
             if token:
-                resp = httpx.get(url, headers=_authenticated_headers(url, token), timeout=10.0)
+                resp = httpx.get(url, headers=solid_auth_client.authenticated_headers(url, token), timeout=10.0)
         resp.raise_for_status()
     except (httpx.HTTPError, httpx.InvalidURL):
         return None
@@ -277,7 +311,24 @@ def _fetch_graph(url: str) -> Graph | None:
         g.parse(data=resp.text, format="turtle", publicID=url)
     except Exception:
         return None
-    return g
+    return _maybe_decrypt(g, url)
+
+
+def _maybe_decrypt(g: Graph, url: str) -> Graph:
+    """No-op passthrough unless `g` is a solidpod-encrypted whole-document
+    replacement (see pod_decryption.py) and decryption is configured. Also
+    reverses NotePod's own inner noteContent cipher (see
+    pod_decryption.notepod_decrypt_content) -- unconditional and harmless to
+    call on any graph, since it's a no-op unless a noteContent/
+    createdDateTime pair is actually present."""
+    if pod_decryption.is_encrypted_resource(g, url):
+        root = solid_auth_client.pod_root_url()
+        if root and url.startswith(root):
+            resource_path = url[len(root):]
+            g = pod_decryption.maybe_decrypt_resource(
+                g, url, resource_path, _fetch_graph, solid_auth_client.ENCRYPTION_BASE_URL
+            )
+    return pod_decryption.notepod_decrypt_content(g)
 
 
 def _load_local_facts(purpose: str) -> list[dict[str, str]]:
@@ -300,7 +351,9 @@ def _load_local_facts(purpose: str) -> list[dict[str, str]]:
 def _load_pod_facts(purpose: str) -> list[dict[str, str]]:
     """Fetch the purpose container, then each contained resource, and flatten
     literal objects into facts."""
-    container = POD_BASE_URL.rstrip("/") + "/" + CONTEXT_ROOT + "/" + purpose + "/"
+    container = _purpose_container_url(purpose)
+    if not container:
+        return []
     cg = _fetch_graph(container)
     if cg is None:
         return []
