@@ -1,11 +1,16 @@
 """
 Custos broker — walking-skeleton prototype (Phase 0).
 
-An MCP server that fronts a Solid POD and exposes a *deliberately tiny* tool
-surface to an AI agent (Claude Desktop, over stdio). Two tools only:
+An MCP server that fronts a Solid POD and exposes a *deliberately small* tool
+surface to an AI agent (Claude Desktop / Claude Code, over stdio):
 
-    - list_purposes()               -> the categories of context available
-    - search_context(query, purpose) -> minimal facts, gated by consent
+    - list_purposes()                    -> the categories of context available
+    - search_context(query, purpose)     -> minimal facts, gated by consent
+    - get_document(purpose, path)        -> one specific resource, gated by consent
+    - describe_purpose(purpose)          -> field names + one example each, gated
+    - request_access(purpose, reason?)   -> records a request; never self-grants
+    - get_audit(purpose?, limit?)        -> recent audit-log entries; ungated,
+                                             it's the transparency mechanism itself
 
 The one thing that makes this the product and not a generic file reader is the
 CONSENT GATE: before any data leaves the vault, we check a grants file. No
@@ -82,7 +87,7 @@ load_dotenv(Path(__file__).parent / ".env")
 import json
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from rdflib import Graph
@@ -104,6 +109,7 @@ from broker_token_verifier import REQUIRED_SCOPES, CustosTokenVerifier
 HOME = Path(os.environ.get("SOLIDMCP_HOME", Path(__file__).parent)).resolve()
 GRANTS_PATH = HOME / "grants.json"
 AUDIT_PATH = HOME / "audit.log"
+PENDING_REQUESTS_PATH = HOME / "pending_requests.json"
 
 POD_BASE_URL = os.environ.get("POD_BASE_URL")  # e.g. http://localhost:3000/alice/
 LOCAL_CONTEXT_DIR = os.environ.get("LOCAL_CONTEXT_DIR")
@@ -194,6 +200,30 @@ def _load_grants() -> dict[str, Any]:
 def _is_granted(purpose: str, action: str = "read") -> bool:
     grants = _load_grants().get("grants", {})
     return bool(grants.get(purpose, {}).get(action, False))
+
+
+def _load_pending_requests() -> dict[str, Any]:
+    if not PENDING_REQUESTS_PATH.exists():
+        return {}
+    try:
+        return json.loads(PENDING_REQUESTS_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_pending_request(purpose: str, reason: str | None) -> None:
+    """Record (or refresh) a pending access request for the user to review
+    later -- request_access() never grants anything itself, this is just
+    the note-left-for-the-user side of that."""
+    data = _load_pending_requests()
+    data[purpose] = {
+        "reason": reason,
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        PENDING_REQUESTS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _purpose_container_url(purpose: str) -> str | None:
@@ -375,6 +405,52 @@ def _load_pod_facts(purpose: str) -> list[dict[str, str]]:
     return facts
 
 
+def _resolve_document_url(purpose: str, path: str) -> str | None:
+    """POD mode: resolve `path` (a name/path relative to the purpose's own
+    container, or a full URL) against that container, refusing anything
+    that doesn't actually land inside it -- get_document must not become a
+    way to read other purposes' (or other apps') data past the consent
+    gate.
+
+    Uses urljoin (proper RFC 3986 dot-segment resolution) rather than plain
+    string concatenation -- a naive `container + path` check is vacuous
+    against a path like "../../other-purpose/data/x.ttl", since the
+    resulting *string* still starts with the container prefix even though
+    the *URL* it actually names (once a "../" is followed, by the HTTP
+    client or the server) does not. Confirmed exploitable against a real
+    POD before this fix: the request that actually went out reached a
+    sibling purpose's container.
+    """
+    container = _purpose_container_url(purpose)
+    if not container:
+        return None
+    container_norm = container.rstrip("/") + "/"
+    if path.startswith(("http://", "https://")):
+        url = path
+    else:
+        url = urljoin(container_norm, path.lstrip("/"))
+    if url.rstrip("/") != container.rstrip("/") and not url.startswith(container_norm):
+        return None
+    return url
+
+
+def _resolve_local_document_path(purpose: str, path: str) -> Path | None:
+    """Local-dir mode equivalent of _resolve_document_url -- same
+    containment check, via Path.relative_to instead of a URL prefix."""
+    base = Path(LOCAL_CONTEXT_DIR) / CONTEXT_ROOT / purpose
+    if not base.is_dir():
+        base = Path(LOCAL_CONTEXT_DIR) / purpose
+    if not base.is_dir():
+        return None
+    base = base.resolve()
+    target = (base / path).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        return None
+    return target if target.is_file() else None
+
+
 def _facts_from_graph(g: Graph, source: str) -> list[dict[str, str]]:
     """Turn a graph's literal triples into flat, human-readable facts. Each fact
     keeps its source and the predicate's local name so the agent (and the audit)
@@ -503,6 +579,215 @@ def search_context(query: str, purpose: str) -> dict[str, Any]:
         "facts": matched,
         "note": f"Returned {len(matched)} fact(s), capped at {MAX_FACTS}. "
         "This is the minimal consented slice, not a bulk export.",
+    }
+
+
+@mcp.tool()
+def get_document(purpose: str, path: str) -> dict[str, Any]:
+    """Fetch one specific resource from a purpose's container, instead of a
+    fresh keyword search.
+
+    Args:
+        purpose: the context category, e.g. "notepod". Must have an active
+                 read grant, same as search_context.
+        path:    the resource's name/path relative to that purpose's
+                 container (e.g. "note-123.ttl"), or a full URL as returned
+                 in a previous search_context result's "source" field.
+                 Anything that resolves outside that purpose's own
+                 container is refused.
+
+    Use this once search_context (or a prior get_document/describe_purpose
+    call) has already told you which resource you want.
+    """
+    if not _is_granted(purpose, "read"):
+        _audit({"tool": "get_document", "purpose": purpose, "path": path, "decision": "deny", "reason": "no_grant"})
+        return {
+            "status": "denied",
+            "message": f"Access denied: consent required for purpose '{purpose}'. "
+            f"Ask the user to grant read access in their Custos console.",
+        }
+
+    if POD_BASE_URL:
+        url = _resolve_document_url(purpose, path)
+        if url is None:
+            _audit(
+                {
+                    "tool": "get_document",
+                    "purpose": purpose,
+                    "path": path,
+                    "decision": "deny",
+                    "reason": "outside_container_or_no_container",
+                }
+            )
+            return {
+                "status": "denied",
+                "message": "That path isn't inside this purpose's granted container "
+                "(or the container itself couldn't be found).",
+            }
+        g = _fetch_graph(url)
+        if g is None:
+            _audit({"tool": "get_document", "purpose": purpose, "path": path, "decision": "allow", "result_count": 0})
+            return {"status": "error", "message": f"Couldn't fetch or parse '{url}'."}
+        facts = _facts_from_graph(g, source=url)
+        source_label = url
+    else:
+        target = _resolve_local_document_path(purpose, path)
+        if target is None:
+            _audit(
+                {
+                    "tool": "get_document",
+                    "purpose": purpose,
+                    "path": path,
+                    "decision": "deny",
+                    "reason": "outside_container_or_not_found",
+                }
+            )
+            return {
+                "status": "denied",
+                "message": "That path isn't inside this purpose's local directory (or doesn't exist).",
+            }
+        g = Graph()
+        try:
+            g.parse(str(target), format="turtle")
+        except Exception:
+            _audit({"tool": "get_document", "purpose": purpose, "path": path, "decision": "allow", "result_count": 0})
+            return {"status": "error", "message": f"Couldn't parse '{target.name}'."}
+        facts = _facts_from_graph(g, source=target.name)
+        source_label = target.name
+
+    _audit(
+        {"tool": "get_document", "purpose": purpose, "path": path, "decision": "allow", "result_count": len(facts)}
+    )
+    return {
+        "status": "ok",
+        "purpose": purpose,
+        "source": source_label,
+        "facts": facts,
+        "note": f"Returned {len(facts)} fact(s) from this one resource -- unfiltered, "
+        "unlike search_context's keyword match.",
+    }
+
+
+@mcp.tool()
+def describe_purpose(purpose: str) -> dict[str, Any]:
+    """Summarize the *shape* of a purpose's data -- which fields exist and
+    one short example value each -- so you can write a sharper
+    search_context query instead of guessing keywords blind.
+
+    Args:
+        purpose: the context category to describe. Must have an active read
+                 grant, same as search_context -- this still touches real
+                 data, just condensed to one example per field rather than
+                 every fact.
+    """
+    if not _is_granted(purpose, "read"):
+        _audit({"tool": "describe_purpose", "purpose": purpose, "decision": "deny", "reason": "no_grant"})
+        return {
+            "status": "denied",
+            "message": f"Access denied: consent required for purpose '{purpose}'. "
+            f"Ask the user to grant read access in their Custos console.",
+        }
+
+    facts = _load_facts(purpose)
+    fields: dict[str, dict[str, Any]] = {}
+    for fact in facts:
+        pred = fact["predicate"]
+        entry = fields.setdefault(pred, {"count": 0, "example": None})
+        entry["count"] += 1
+        if entry["example"] is None:
+            text = fact["text"]
+            entry["example"] = text if len(text) <= 60 else text[:57] + "..."
+
+    _audit({"tool": "describe_purpose", "purpose": purpose, "decision": "allow", "result_count": len(fields)})
+    return {
+        "status": "ok",
+        "purpose": purpose,
+        "fields": fields,
+        "note": f"{len(fields)} distinct field(s) across {len(facts)} fact(s) total. "
+        "Example values are truncated -- use search_context for the actual facts you need.",
+    }
+
+
+@mcp.tool()
+def request_access(purpose: str, reason: str | None = None) -> dict[str, Any]:
+    """Ask the user to grant read access to a purpose that isn't currently
+    readable -- either it has no grants.json entry at all, or read is
+    currently off.
+
+    Args:
+        purpose: the context category you want access to.
+        reason:  a short, honest note on why you want it (shown to the user
+                 later, so they can decide).
+
+    This does NOT grant access -- only the user can do that, in
+    setup_gui.py's grants table or by hand in grants.json. It just records
+    the request (pending_requests.json, plus the audit log) for the user to
+    review. Call it once per purpose per conversation, not repeatedly.
+    """
+    already_granted = _is_granted(purpose, "read")
+    _save_pending_request(purpose, reason)
+    _audit(
+        {
+            "tool": "request_access",
+            "purpose": purpose,
+            "reason": reason,
+            "decision": "recorded",
+            "already_granted": already_granted,
+        }
+    )
+    if already_granted:
+        return {
+            "status": "already_granted",
+            "message": f"'{purpose}' already has read access granted -- no request needed.",
+        }
+    return {
+        "status": "recorded",
+        "message": f"Recorded a request for read access to '{purpose}'. The user needs to grant it "
+        "themselves (setup_gui.py's grants table, or grants.json by hand) -- this call can't "
+        "grant access on its own.",
+    }
+
+
+@mcp.tool()
+def get_audit(purpose: str | None = None, limit: int = 20) -> dict[str, Any]:
+    """Read recent entries from the broker's own audit log.
+
+    Args:
+        purpose: if set, only entries recorded for this purpose (matches
+                 both allowed and denied calls). Omit to see everything.
+        limit:   how many of the most recent matching entries to return
+                 (default 20, capped at 100).
+
+    Not gated by a consent grant -- this is the transparency mechanism
+    itself (including a record of denials), not vault content, so there's
+    nothing here that consent would even apply to.
+    """
+    limit = max(1, min(limit, 100))
+    entries: list[dict[str, Any]] = []
+    if AUDIT_PATH.exists():
+        try:
+            with AUDIT_PATH.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+
+    if purpose is not None:
+        entries = [e for e in entries if e.get("purpose") == purpose]
+    recent = entries[-limit:]
+
+    _audit({"tool": "get_audit", "purpose": purpose, "decision": "allow", "result_count": len(recent)})
+    return {
+        "status": "ok",
+        "purpose": purpose,
+        "entries": recent,
+        "note": f"Returned the {len(recent)} most recent matching entry(ies) out of {len(entries)} total.",
     }
 
 

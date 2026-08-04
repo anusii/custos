@@ -220,6 +220,7 @@ __marimo__/
 # Runtime artefacts
 audit.log
 dpop_key.json
+pending_requests.json
 .venv/
 __pycache__/
 *.pyc
