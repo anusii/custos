@@ -9,7 +9,27 @@ locally, in this process, never sent anywhere.
 **What you'll see working, end to end:**
 1. Claude reads a fact/data from your vault (POD), but only because a grant exists.
 2. Every access (allowed or denied) lands in an append-only audit log.
-3. Flip the grant off, and the *next* call is refusede, no restart.
+3. Flip the grant off, and the *next* call is refused, no restart.
+
+## Tools Claude gets
+
+- `list_purposes()` - the categories of context that exist (names only, no
+  data).
+- `search_context(query, purpose)` - keyword-matched facts for one purpose,
+  gated by consent.
+- `get_document(purpose, path)` - one specific resource by name/path (e.g. a
+  `source` field from a previous `search_context` result), gated by consent,
+  refused if it resolves outside that purpose's own container.
+- `describe_purpose(purpose)` - the field names that exist for a purpose plus
+  one short example value each, so Claude can write a sharper
+  `search_context` query instead of guessing. Gated by consent, same as
+  `search_context`.
+- `request_access(purpose, reason?)` - records a request for the user to
+  review later (`pending_requests.json` plus the audit log). Never grants
+  access itself; only the user can do that.
+- `get_audit(purpose?, limit?)` - recent entries from the audit log. Not
+  gated, this is the transparency mechanism itself, including a record of
+  denials.
 
 ## Prerequisites
 
@@ -269,5 +289,8 @@ adding.
 - `grants.json` → real per-purpose OAuth scopes - blocked on CSS's fixed
   scope list; would need either extending CSS or a dedicated Authorization
   Server. `grants.json` remains the real purpose-level gate for now.
-- Remaining tools from the original design: `request_access`, `get_document`,
-  `append_memory`, `get_audit`.
+- `append_memory` - the one remaining tool from the original design, and the
+  only one that would make the broker write back to the POD. Needs its own
+  write-side consent flag (separate from `read`) and POD write auth before
+  it's just "another tool", so it's a deliberate scope decision, not yet
+  started.
