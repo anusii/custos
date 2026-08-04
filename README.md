@@ -6,8 +6,13 @@ two layers, and fully audited.
 
 ## What's here
 
-- **Two MCP tools**: `list_purposes` (what categories of context exist) and
-  `search_context` (retrieve facts for a purpose).
+- **Six MCP tools**: `list_purposes` (what categories of context exist),
+  `search_context` (keyword-matched facts for a purpose), `get_document`
+  (one specific resource by name/path), `describe_purpose` (field names +
+  one example each, to sharpen a search), `request_access` (records a
+  request for the user to review — never self-grants), and `get_audit`
+  (recent audit-log entries, ungated). All but `get_audit` are gated by the
+  same consent check as `search_context`.
 - **Consent gate**: `grants.json` decides what's readable per purpose. Revoke
   a grant and the next call is refused, live — no restart. Editable by hand
   or from `setup_gui.py`'s own grants table (toggle/add/remove purposes).
@@ -37,9 +42,12 @@ wire it into Claude Desktop or Claude Code, run the demo.
 
 ## What's not here yet
 
-Semantic search (currently a dumb keyword match), fine-grained per-purpose
-OAuth scopes, legacy (v1) POD key-derivation support, and RSA private-key
-decryption / cross-user resource sharing.
+`append_memory` (the only planned tool that would make the broker write
+back to the POD — needs its own write-side consent flag, so it's a
+deliberate scope decision, not yet started), semantic search (currently a
+dumb keyword match), fine-grained per-purpose OAuth scopes, legacy (v1) POD
+key-derivation support, and RSA private-key decryption / cross-user resource
+sharing.
 
 ## Background
 
