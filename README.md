@@ -26,6 +26,9 @@ is gated by consent, authenticated at two layers, and fully audited.
   TNO-encrypted) derived master key persisted via your OS's secure
   credential store (`keyring`). A manually-created CSS Client Credentials
   pair still works as a fallback, useful for automation.
+
+<img width="615" height="1132" alt="custos-mcp" src="https://github.com/user-attachments/assets/4a6849f7-c4b2-491d-940b-888bbeb6045a" />
+
 - **Local TNO decryption**: matches `solidpod`'s own key-derivation and
   content-cipher scheme (Argon2id, HKDF, AES-256-CTR) byte-for-byte, plus
   NotePod's additional inner field cipher. Decryption happens locally in
