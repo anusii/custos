@@ -50,8 +50,3 @@ deliberate scope decision, not yet started), semantic search (currently a
 dumb keyword match), fine-grained per-purpose OAuth scopes, legacy (v1) POD
 key-derivation support, and RSA private-key decryption / cross-user resource
 sharing.
-
-## Background
-
-The product vision and commercialisation analysis this prototype was scoped
-from live in [PLAN.md](PLAN.md).
